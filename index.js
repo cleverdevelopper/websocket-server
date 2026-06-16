@@ -30,6 +30,9 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const PHP_API_URL = process.env.PHP_API_URL;
 
+const onlineUsers = new Map();
+
+
 // ─── Auth Middleware ──────────────────────────────────────────────────────────
 
 io.use((socket, next) => {
@@ -139,6 +142,17 @@ io.on('connection', async (socket) => {
   const userId = socket.user.id || socket.user.user_id;
   const personalRoom = `user_${userId}`;
   socket.join(personalRoom);
+
+  const userIdStr = String(userId);
+  console.log(`[WS] Connection attempt: User ${userIdStr} connected on socket ${socket.id}`);
+  if (!onlineUsers.has(userIdStr)) {
+    onlineUsers.set(userIdStr, new Set());
+    console.log(`[WS] Broadcaster: User ${userIdStr} is now ONLINE. Emitting user_status 'online'.`);
+    io.emit('user_status', { user_id: userIdStr, status: 'online' });
+  } else {
+    console.log(`[WS] User ${userIdStr} already has active connections. Current count: ${onlineUsers.get(userIdStr).size}`);
+  }
+  onlineUsers.get(userIdStr).add(socket.id);
 
   console.log(`[WS] User ${userId} connected`);
 
@@ -253,9 +267,30 @@ io.on('connection', async (socket) => {
   // ── Disconnect ────────────────────────────────────────────────────────────
 
   socket.on('disconnect', () => {
-    console.log(`[WS] User ${userId} disconnected`);
+    console.log(`[WS] User ${userId} disconnected from socket ${socket.id}`);
     socket.typingTimers.forEach((t) => clearTimeout(t));
     socket.typingTimers.clear();
+
+    const userIdStr = String(userId);
+    const userSockets = onlineUsers.get(userIdStr);
+    if (userSockets) {
+      userSockets.delete(socket.id);
+      console.log(`[WS] Removed socket connection ${socket.id} for user ${userIdStr}. Remaining connection count: ${userSockets.size}`);
+      if (userSockets.size === 0) {
+        onlineUsers.delete(userIdStr);
+        console.log(`[WS] Broadcaster: User ${userIdStr} is now OFFLINE. Emitting user_status 'offline'.`);
+        io.emit('user_status', { user_id: userIdStr, status: 'offline' });
+      }
+    }
+  });
+
+  // ── Get User Status ────────────────────────────────────────────────────────
+
+  socket.on('get_user_status', ({ user_id }) => {
+    const targetIdStr = String(user_id);
+    const isOnline = onlineUsers.has(targetIdStr);
+    console.log(`[WS] get_user_status query: is target ${targetIdStr} online? ${isOnline}`);
+    socket.emit('user_status', { user_id: targetIdStr, status: isOnline ? 'online' : 'offline' });
   });
 });
 
