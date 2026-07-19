@@ -98,6 +98,8 @@ function normalizeMessage(phpResponse, fallbackSignalType) {
     signal_message_type:  signalType,
     message_type:         data.type ?? data.message_type ?? 'text',
     sent_at:              data.sent_at,
+    reply_to_message_id:  data.reply_to_message_id ?? null,
+    attachment:           data.attachment ?? null,
   };
 }
 
@@ -178,6 +180,7 @@ io.on('connection', async (socket) => {
       message_type,
       signal_message_type,
       reply_to_message_id,
+      attachment,
     } = data;
 
     // Validate signal_message_type before sending to PHP
@@ -201,6 +204,7 @@ io.on('connection', async (socket) => {
           type:                 message_type || 'text',
           signal_message_type:  resolvedSignalType,
           reply_to_message_id:  reply_to_message_id || null,
+          attachment:           attachment || null,
         },
         {
           headers: { Authorization: `Bearer ${socket.handshake.auth.token}` },
@@ -209,6 +213,12 @@ io.on('connection', async (socket) => {
 
       const normalized = normalizeMessage(response.data, resolvedSignalType);
       io.to(`conversation_${conversation_id}`).emit('receive_message', normalized);
+
+      // Emit to each participant's personal room
+      const participantIds = response.data.participant_ids || [];
+      participantIds.forEach(pId => {
+        io.to(`user_${pId}`).emit('receive_message', normalized);
+      });
     } catch (error) {
       console.error('[WS] send_message error:', error?.response?.data || error?.message);
       socket.emit('error_message', { message: 'Failed to send message' });
@@ -233,6 +243,73 @@ io.on('connection', async (socket) => {
     } catch {
       // Silently ignore — not critical path
     }
+  });
+
+  // ── Delete Message ────────────────────────────────────────────────────────
+
+  socket.on('delete_message', async ({ message_id }) => {
+    try {
+      const response = await axios.post(
+        `${PHP_API_URL}/messages/${message_id}/delete-everyone`,
+        {},
+        { headers: { Authorization: `Bearer ${socket.handshake.auth.token}` } }
+      );
+
+      if (response.data && response.data.success) {
+        const responseData = response.data || {};
+        const conversation_id = responseData.conversation_id;
+        const participantIds = responseData.participant_ids || [];
+        const payload = {
+          message_id: message_id,
+          conversation_id: conversation_id,
+          deleted_by: userId,
+        };
+
+        // Emit to each participant's personal room
+        participantIds.forEach((pId) => {
+          io.to(`user_${pId}`).emit('message_deleted', payload);
+        });
+      }
+    } catch (error) {
+      console.error('[WS] delete_message error:', error?.response?.data || error?.message);
+    }
+  });
+
+  // ── Edit Message ──────────────────────────────────────────────────────────
+
+  socket.on('edit_message', async ({ message_id, new_content }) => {
+    try {
+      const response = await axios.post(
+        `${PHP_API_URL}/messages/${message_id}/edit`,
+        { content: new_content },
+        { headers: { Authorization: `Bearer ${socket.handshake.auth.token}` } }
+      );
+
+      if (response.data && response.data.success) {
+        const responseData = response.data || {};
+        const conversation_id = responseData.conversation_id;
+        const participantIds = responseData.participant_ids || [];
+        const payload = {
+          message_id: message_id,
+          conversation_id: conversation_id,
+          new_content: new_content,
+          sender_id: userId,
+        };
+
+        // Emit to each participant's personal room
+        participantIds.forEach((pId) => {
+          io.to(`user_${pId}`).emit('message_edited', payload);
+        });
+      }
+    } catch (error) {
+      console.error('[WS] edit_message error:', error?.response?.data || error?.message);
+    }
+  });
+
+  // ── Message Reactions ─────────────────────────────────────────────────────
+
+  socket.on('message_reaction', (data) => {
+    socket.to(`conversation_${data.conversation_id}`).emit('message_reaction', data);
   });
 
   // ── Typing Indicators ─────────────────────────────────────────────────────
